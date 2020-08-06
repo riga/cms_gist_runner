@@ -47,13 +47,13 @@ cleanup directory /tmp/mrieger/tmpuXFIDP
 
 ### Usage at CERN / with afs
 
-A symlink to the latest version is located on afs at `~mrieger/pulic/bin/cms_gist_runner`.
+A symlink to the latest version is located on afs at `~mrieger/public/bin/cms_gist_runner`.
 
 
 ### Help
 
 ```shell
-> ~mrieger/pulic/bin/cms_gist_runner --help
+> ~mrieger/public/bin/cms_gist_runner --help
 
 usage: cms_gist_runner [-h] [--cmssw-version CMSSW_VERSION]
                        [--scram-arch SCRAM_ARCH] [--checkout-dir CHECKOUT_DIR]
