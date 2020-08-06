@@ -1,0 +1,366 @@
+#!/usr/bin/env python
+
+"""
+CMS gist runner.
+This tool is intended to speed up development processes as well as the exchange and tests of common
+recipes and snippets. It sets up a new (optionally temporary) CMSSW environment or uses an existing
+one, takes a local file or downloads a gist from GitHub, and executes it.
+
+Please note that it is *highly* recommended to read and understand a gist before running it!
+
+Example:
+> cms_gist_runner 522d2d08dab617a46444213fe202d919 --cmssw-version CMSSW_11_1_2 --temporary
+"""
+
+__author__ = "Marcel Rieger"
+__email__ = "marcel.rieger@cern.ch"
+__version__ = "0.0.1"
+
+
+import os
+import sys
+import tempfile
+import subprocess
+import shutil
+import json
+import time
+import contextlib
+from pwd import getpwuid
+
+
+PY2 = sys.version_info.major == 2
+
+GIST_API_TMPL = "https://api.github.com/gists/{}"
+
+
+def main():
+    import argparse
+
+    # setup argument parsing
+    parser = argparse.ArgumentParser(description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("gist", help="a local file or the id of a gist to load and execute")
+    parser.add_argument("--cmssw-version", "-v", help="CMSSW version to set up for running the "
+        "gist, not considered when already running within a CMSSW environment, required otherwise")
+    parser.add_argument("--scram-arch", "-a", help="scram architecture to set up for running the "
+        "gist, not considered when already running within a CMSSW environment, default: empty")
+    parser.add_argument("--checkout-dir", "-d", default=".", help="directory in which CMSSW "
+        "checkouts are stored, not considered when already running within a CMSSW environment, "
+        "default: .")
+    parser.add_argument("--gist-dir", "-g", default=".", help="directory in which the gist is "
+        "downloaded and executed, default: .")
+    parser.add_argument("--cleanup", "-c", action="store_true", help="remove newly created CMSSW "
+        "checkouts after running the gist, not considered when already running within a CMSSW "
+        "environment or when an existing checkout for this requested version was found")
+    parser.add_argument("--temporary", "-t", action="store_true", help="when not already running "
+        "within an existing CMSSW environment, do the checkout in a temporary directory and remove "
+        "it after running the gist, same as '--checkout-dir TMP --gist-dir TMP --cleanup'")
+    parser.add_argument("--executable", "-e", default="python", help="executable to run the gist "
+        "with, default: python")
+    parser.add_argument("--force-run", "-f", action="store_true", help="skip the confirmation "
+        "prompt")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="run the steps but do not "
+        "execute any command")
+
+    # keep track of paths to cleanup
+    cleanup_paths = []
+
+    # detect any current cmssw env
+    cmssw_base = get_current_cmssw_base()
+    env_is_existing = cmssw_base is not None
+
+    # parse and validate some arguments
+    args = parser.parse_args()
+    if not env_is_existing and not args.cmssw_version:
+        raise ValueError("cmssw version (--cmssw-version, -v) must be set when not already in "
+            "a CMSSW environment")
+    if args.temporary:
+        args.cleanup = True
+        args.gist_dir = tempfile.mkdtemp()
+        cleanup_paths.append(args.gist_dir)
+        if not env_is_existing:
+            args.checkout_dir = args.gist_dir
+    else:
+        args.checkout_dir = normalize_path(args.checkout_dir)
+        args.gist_dir = normalize_path(args.gist_dir)
+
+    # get meta data
+    gist_is_local = os.path.exists(args.gist)
+    if gist_is_local:
+        args.gist = normalize_path(args.gist)
+        meta_data = get_local_gist_meta_data(args.gist)
+    else:
+        meta_data = get_gist_meta_data(args.gist)
+
+    # print some infos
+    print("CMS gist runner" + (" (dry run)" if args.dry_run else ""))
+    print("")
+    if env_is_existing:
+        print("CMSSW base        : {}".format(cmssw_base))
+        print("CMSSW version     : {}".format(os.environ["CMSSW_VERSION"]))
+        print("SCRAM architecture: {}".format(os.environ["SCRAM_ARCH"]))
+    else:
+        print("Checkout directory: {}".format(args.checkout_dir))
+        print("CMSSW version     : {}".format(args.cmssw_version))
+        print("SCRAM architecture: {}".format(args.scram_arch or "-"))
+    print("Gist directory    : {}".format(args.gist_dir))
+    print("Gist owner        : {}".format(meta_data["owner"]))
+    print("Gist description  : {}".format(meta_data["description"] or "-"))
+    print("Gist name         : {}".format(meta_data["filename"]))
+    print("Gist location     : {}".format(meta_data["location"]))
+    print("Gist URI          : {}".format(meta_data["uri"]))
+    print("")
+
+    # show a prompt to confirm running the gist
+    if not args.force_run and not args.dry_run:
+        text = "Press 'y' to run the remote gist, or any other key to stop: "
+        try:
+            choice = (raw_input if PY2 else input)(text).strip()
+        except KeyboardInterrupt:
+            choice = "n"
+        if choice != "y":
+            return
+        print("")
+
+    # setup a cmssw env if necessary
+    if not env_is_existing:
+        cmssw_base, env_is_new = setup_cmssw(args.checkout_dir, args.cmssw_version, args.scram_arch,
+            dry=args.dry_run)
+        if env_is_new:
+            print("created new CMSSW environment {}".format(cmssw_base))
+            cleanup_paths.append(cmssw_base)
+        else:
+            print("using existing CMSSW environment {}".format(cmssw_base))
+    else:
+        print("using current CMSSW environment {}".format(cmssw_base))
+        env_is_new = False
+
+    # download or copy the gist
+    if gist_is_local:
+        abs_gist_file, gist_dir_is_new, gist_file_is_new = copy_local_gist(args.gist, args.gist_dir)
+        if gist_file_is_new:
+            print("copied gist to {}".format(abs_gist_file))
+    else:
+        abs_gist_file, gist_dir_is_new, gist_file_is_new = download_gist(meta_data, args.gist_dir)
+        print("downloaded gist to {}".format(abs_gist_file))
+    if gist_dir_is_new:
+        cleanup_paths.append(args.gist_dir)
+    elif gist_file_is_new:
+        cleanup_paths.append(abs_gist_file)
+
+    # run it
+    with run_context():
+        run_gist(abs_gist_file, cwd=args.gist_dir, executable=args.executable,
+            cmssw_base=None if env_is_existing else cmssw_base, dry=args.dry_run)
+
+    # cleanup
+    if args.cleanup:
+        for path in cleanup_paths[::-1]:
+            if os.path.isdir(path):
+                print("cleanup directory {}".format(path))
+                shutil.rmtree(path)
+            elif os.path.isfile(path):
+                print("cleanup file {}".format(path))
+                os.remove(path)
+
+
+def get_current_cmssw_base():
+    """
+    Returns the *CMSSW_BASE* environment variable when a CMSSW environment is currently active, and
+    *None* otherwise.
+    """
+    if os.getenv("CMSSW_RELEASE_BASE"):
+        return os.environ["CMSSW_BASE"]
+    else:
+        return None
+
+
+def setup_cmssw(base_dir, cmssw_version, scram_arch=None, dry=False):
+    """
+    Sets up a CMSSW environment in the directory *base_dir* with version *cmssw_version* and an
+    optional *scram_arch*. Returns a 2-tuple containing the *CMSSW_BASE* variable of the environment
+    alongside a boolean flag that is *True* when the environment was newly created, and *False*
+    otherwise. When *dry* is *True*, the command is printed but not actually executed.
+    """
+    cmssw_base = os.path.join(base_dir, cmssw_version)
+
+    # do nothing when the checkout already exists
+    if os.path.exists(os.path.join(cmssw_base, "src")):
+        return cmssw_base, False
+
+    # build the subprocess command and run it
+    cmd = "source '/cvmfs/cms.cern.ch/cmsset_default.sh' ''"
+    cmd += " && mkdir -p '{0}' && cd '{0}'".format(base_dir)
+    if scram_arch:
+        cmd += " && export SCRAM_ARCH='{}'".format(scram_arch)
+    cmd += " && scramv1 project CMSSW '{}'".format(cmssw_version)
+
+    if dry:
+        print("dry command: {}".format(cmd))
+    else:
+        subprocess.check_call(cmd, shell=True, executable="/bin/bash")
+
+    return cmssw_base, True
+
+
+def get_gist_meta_data(gist_id):
+    """
+    Returns meta data of the gist defined by *gist_id* in a dictionary with the fields ``"id"``,
+    ``"filename"``, ``"location"``, ``"uri"``, ``"owner"`` and ``"description"``.
+    """
+    meta_content = url_read(GIST_API_TMPL.format(gist_id))
+    all_meta_data = json.loads(meta_content)
+
+    filename = list(all_meta_data["files"].keys())[0]
+
+    return dict(
+        id=str(gist_id),
+        filename=str(filename),
+        location=str(all_meta_data["html_url"]),
+        uri=str(all_meta_data["files"][filename]["raw_url"]),
+        owner=str(all_meta_data["owner"]["login"]),
+        description=str(all_meta_data["description"]),
+    )
+
+
+def get_local_gist_meta_data(path):
+    """
+    Returns meta data of a local file at *path* a dictionary with the fields described in
+    :py:func:`get_gist_meta_data`.
+    """
+    path = normalize_path(path)
+
+    return dict(
+        id=path,
+        filename=os.path.basename(path),
+        location=path,
+        uri="file://{}".format(os.path.realpath(path)),
+        owner=getpwuid(os.stat(path).st_uid).pw_name,
+        description=None,
+    )
+
+
+def download_gist(gist_id, gist_dir="."):
+    """
+    Downloads a gist defined by *gist_id* to the directory *gist_dir* and returns a 3-tuple with the
+    absolute path of the downloaded file and two boolean flags stating whether the *gist_dir* and
+    the gist file, respectively, were not existing before. When *gist_id* is a dictionary, it is
+    interpreted as meta data returned by :py:func:`get_gist_meta_data`.
+    """
+    # get meta data
+    if isinstance(gist_id, dict):
+        meta_data = gist_id
+    else:
+        meta_data = get_gist_meta_data(gist_id)
+
+    # create the gist dir
+    gist_dir = normalize_path(gist_dir)
+    gist_dir_is_new = not os.path.exists(gist_dir)
+    if gist_dir_is_new:
+        os.makedirs(gist_dir)
+
+    # download the file
+    gist_file = os.path.join(gist_dir, meta_data["filename"])
+    gist_file_is_new = not os.path.exists(gist_file)
+    with open(gist_file, "w") as f:
+        content = url_read(meta_data["uri"])
+        f.write(content)
+
+    return gist_file, gist_dir_is_new, gist_file_is_new
+
+
+def copy_local_gist(path, gist_dir="."):
+    """
+    Copies a local gist at *path* to the directory *gist_dir* and returns a 3-tuple with the
+    absolute path of the copied file and two boolean flags stating whether the *gist_dir* and the
+    gist file, respectively, were not existing before.
+    """
+    # create the gist dir
+    gist_dir = normalize_path(gist_dir)
+    gist_dir_is_new = not os.path.exists(gist_dir)
+    if gist_dir_is_new:
+        os.makedirs(gist_dir)
+
+    # copy the file if necessary
+    if os.path.dirname(path) == gist_dir:
+        # path points to target location
+        gist_file = path
+        gist_file_is_new = False
+    else:
+        # copy
+        gist_file = os.path.join(gist_dir, os.path.basename(path))
+        gist_file_is_new = not os.path.exists(gist_file)
+        shutil.copy2(path, gist_file)
+
+    return gist_file, gist_dir_is_new, gist_file_is_new
+
+
+def run_gist(gist_file, cwd=None, executable="python", cmssw_base=None, dry=False):
+    """
+    Runs a gist located at *gist_file* with a specified *executable*, defaulting to ``"python"``.
+    When *cmssw_base* is set, the call is placed within the CMSSW environment located at that path.
+    When *dry* is *True*, the command is printed but not actually executed.
+    """
+    # define the execution directory
+    if cwd is None:
+        cwd = os.getcwd()
+
+    # build the action run command
+    cmd = "cd '{}' && {} '{}'".format(cwd, executable, gist_file)
+
+    # prepend cmssw env setup commands
+    if cmssw_base:
+        env_cmd = "source '/cvmfs/cms.cern.ch/cmsset_default.sh' ''"
+        env_cmd += " && cd '{}'".format(os.path.join(cmssw_base, "src"))
+        env_cmd += " && eval \"$( scramv1 runtime -sh )\""
+        cmd = "{} && {}".format(env_cmd, cmd)
+
+    if dry:
+        print("dry command: {}".format(cmd))
+    else:
+        subprocess.check_call(cmd, shell=True, executable="/bin/bash")
+
+
+@contextlib.contextmanager
+def run_context(msg="running ..."):
+    """
+    Prints a message when the context is entered, and prints the runtime when the context returns.
+    """
+    print(msg)
+    print(100 * "=")
+    print("")
+
+    t0 = time.time()
+
+    try:
+        yield
+    finally:
+        print("")
+        print(100 * "=")
+        print("done, took {:.2f} seconds".format(time.time() - t0))
+
+
+def url_read(url):
+    """
+    Reads and returns the remote content referred to by *url*.
+    """
+    if PY2:
+        import urllib2
+        return urllib2.urlopen(url).read()
+    else:
+        import urllib.request
+        return urllib.request.urlopen(url).read().decode("utf-8")
+
+
+def normalize_path(path):
+    """
+    Normalizes a path, expands user and environment variables, and returns its absolute
+    representation.
+    """
+    path = os.path.expandvars(os.path.expanduser(str(path)))
+    path = os.path.normpath(os.path.abspath(path))
+    return path
+
+
+if __name__ == "__main__":
+    main()
