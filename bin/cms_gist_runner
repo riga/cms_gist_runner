@@ -10,10 +10,13 @@ Please note that it is *highly* recommended to read and understand a gist before
 
 Example:
 > cms_gist_runner 522d2d08dab617a46444213fe202d919 --cmssw-version CMSSW_11_1_2 --temporary
+
+For more info, see https://github.com/riga/cms_gist_runner.
 """
 
 __author__ = "Marcel Rieger"
 __email__ = "marcel.rieger@cern.ch"
+__contact__ = "https://github.com/riga/cms_gist_runner"
 __version__ = "0.0.1"
 
 
