@@ -113,7 +113,8 @@ def main():
 
     # show a prompt to confirm running the gist
     if not args.force_run and not args.dry_run:
-        text = "Press 'y' to run the remote gist, or any other key to stop: "
+        location_type = "local" if gist_is_local else "remote"
+        text = "Press 'y' to run the {} gist, or any other key to stop: ".format(location_type)
         try:
             choice = (raw_input if PY2 else input)(text).strip()
         except KeyboardInterrupt:
