@@ -55,10 +55,10 @@ A symlink to the latest version is located on afs at `~mrieger/public/bin/cms_gi
 ```shell
 > ~mrieger/public/bin/cms_gist_runner --help
 
-usage: cms_gist_runner [-h] [--cmssw-version CMSSW_VERSION]
-                       [--scram-arch SCRAM_ARCH] [--checkout-dir CHECKOUT_DIR]
-                       [--gist-dir GIST_DIR] [--cleanup] [--temporary]
-                       [--executable EXECUTABLE] [--force-run] [--dry-run]
+usage: cms_gist_runner [-h] [--cmssw-version VERSION] [--scram-arch ARCH]
+                       [--checkout-dir DIR] [--gist-dir DIR]
+                       [--setup-file FILE] [--cleanup] [--temporary]
+                       [--executable EXE] [--force-run] [--dry-run]
                        gist
 
 CMS gist runner.
@@ -71,26 +71,31 @@ Please note that it is *highly* recommended to read and understand a gist before
 Example:
 > cms_gist_runner 522d2d08dab617a46444213fe202d919 --cmssw-version CMSSW_11_1_2 --temporary
 
+For more info, see https://github.com/riga/cms_gist_runner.
+
 positional arguments:
   gist                  a local file or the id of a gist to load and execute
 
 optional arguments:
   -h, --help            show this help message and exit
-  --cmssw-version CMSSW_VERSION, -v CMSSW_VERSION
+  --cmssw-version VERSION, -v VERSION
                         CMSSW version to set up for running the gist, not
                         considered when already running within a CMSSW
                         environment, required otherwise
-  --scram-arch SCRAM_ARCH, -a SCRAM_ARCH
+  --scram-arch ARCH, -a ARCH
                         scram architecture to set up for running the gist, not
                         considered when already running within a CMSSW
                         environment, default: empty
-  --checkout-dir CHECKOUT_DIR, -d CHECKOUT_DIR
+  --checkout-dir DIR, -d DIR
                         directory in which CMSSW checkouts are stored, not
                         considered when already running within a CMSSW
                         environment, default: .
-  --gist-dir GIST_DIR, -g GIST_DIR
+  --gist-dir DIR, -g DIR
                         directory in which the gist is downloaded and
                         executed, default: .
+  --setup-file FILE, -s FILE
+                        an optional setup file that is sourced prior to the
+                        gist file execution, default: empty
   --cleanup, -c         remove newly created CMSSW checkouts after running the
                         gist, not considered when already running within a
                         CMSSW environment or when an existing checkout for
@@ -99,7 +104,7 @@ optional arguments:
                         environment, do the checkout in a temporary directory
                         and remove it after running the gist, same as
                         '--checkout-dir TMP --gist-dir TMP --cleanup'
-  --executable EXECUTABLE, -e EXECUTABLE
+  --executable EXE, -e EXE
                         executable to run the gist with, default: python
   --force-run, -f       skip the confirmation prompt
   --dry-run, -n         run the steps but do not execute any command
