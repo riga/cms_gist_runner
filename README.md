@@ -15,7 +15,7 @@ one, takes a local file or downloads a gist from GitHub, and executes it.
 ```shell
 > cms_gist_runner 522d2d08dab617a46444213fe202d919 --cmssw-version CMSSW_11_1_2 --temporary
 
-CMS gist runner
+CMS gist runner v0.1.0
 
 Checkout directory: /tmp/mrieger/tmpuXFIDP
 CMSSW version     : CMSSW_11_1_2
